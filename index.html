@@ -494,13 +494,20 @@
         for (const repo of repos.slice(0, MAX_REPOS_TO_SCAN)) {
           if (repo.fork) continue;
           try {
-            const contentsRes = await fetch(`https://api.github.com/repos/${USERNAME}/${repo.name}/contents/`);
-            if (!contentsRes.ok) continue;
-            const files = await contentsRes.json();
-            if (!Array.isArray(files)) continue;
-            for (const file of files) {
-              if (file.type === "file" && mediaExt.test(file.name)) {
-                items.push({ repo: repo.name, name: file.name, url: file.download_url, repoUrl: repo.html_url });
+            const branch = repo.default_branch || "main";
+            // Recursive git-tree call: one request returns every file in the repo
+            // at any folder depth, so media inside subfolders (e.g. "Video presentation/")
+            // is found too, not just files sitting at the repo root.
+            const treeRes = await fetch(`https://api.github.com/repos/${USERNAME}/${repo.name}/git/trees/${branch}?recursive=1`);
+            if (!treeRes.ok) continue;
+            const tree = await treeRes.json();
+            if (!Array.isArray(tree.tree)) continue;
+            for (const entry of tree.tree) {
+              if (entry.type === "blob" && mediaExt.test(entry.path)) {
+                const encodedPath = entry.path.split("/").map(encodeURIComponent).join("/");
+                const rawUrl = `https://raw.githubusercontent.com/${USERNAME}/${repo.name}/${branch}/${encodedPath}`;
+                const fileName = entry.path.split("/").pop();
+                items.push({ repo: repo.name, name: fileName, url: rawUrl, repoUrl: repo.html_url });
               }
             }
           } catch (innerErr) { /* skip this repo, keep going */ }
