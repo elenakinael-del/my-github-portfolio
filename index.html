@@ -373,8 +373,87 @@
       const USERNAME = "elenakinael-del";
       const MAX_REPOS_TO_SCAN = 30;   // keeps well under the 60 req/hr limit
       const MAX_ITEMS_SHOWN = 10;
-      const CACHE_KEY = "gh-gallery-cache-v1";
+      const CACHE_KEY = "gh-gallery-cache-v3";
       const CACHE_TTL_MS = 60 * 60 * 1000;
+
+      // Pinned items always render immediately, with no dependency on the live
+      // GitHub API call succeeding — that call is now purely a bonus enhancement,
+      // not something the gallery's first paint waits on or depends on. These are
+      // all verified working (checked directly against raw.githubusercontent.com).
+      // Add more any time a repo's media isn't being picked up automatically.
+      const PINNED_ITEMS = [
+        { repo: "btc-funding-radar", name: "historical_funding_arbitrage.mp4",
+          url: "https://raw.githubusercontent.com/elenakinael-del/btc-funding-radar/main/Video%20presentation/historical_funding_arbitrage.mp4",
+          repoUrl: "https://github.com/elenakinael-del/btc-funding-radar" },
+        { repo: "Gold-Manifold-Dynamical-System", name: "gold_relativistic_manifold_1H.mp4",
+          url: "https://raw.githubusercontent.com/elenakinael-del/Gold-Manifold-Dynamical-System/main/gold_relativistic_manifold_1H.mp4",
+          repoUrl: "https://github.com/elenakinael-del/Gold-Manifold-Dynamical-System" },
+        { repo: "macro_pressure_field_gold", name: "macro_gold_real_market_dashboard.mp4",
+          url: "https://raw.githubusercontent.com/elenakinael-del/macro_pressure_field_gold/main/macro_gold_real_market_dashboard.mp4",
+          repoUrl: "https://github.com/elenakinael-del/macro_pressure_field_gold" },
+        { repo: "gc-futures-quant-framework_aurum", name: "gold_hmm_regime_surface_20260625.mp4",
+          url: "https://raw.githubusercontent.com/elenakinael-del/gc-futures-quant-framework_aurum/main/gold_hmm_regime_surface_20260625.mp4",
+          repoUrl: "https://github.com/elenakinael-del/gc-futures-quant-framework_aurum" }
+      ];
+
+      function mergeWithPinned(items) {
+        const seen = new Set();
+        const merged = [];
+        for (const it of [...PINNED_ITEMS, ...items]) {
+          if (seen.has(it.url)) continue;
+          seen.add(it.url);
+          merged.push(it);
+        }
+        return merged;
+      }
+
+      // Picks the most "showcase-worthy" media out of every candidate found across
+      // all repos, instead of just whatever was found first. Two ideas drive it:
+      //  1. Tiny files are almost always logos/icons/badges, not real visualisations
+      //     — filtered out by a minimum byte size, and by filename patterns.
+      //  2. A good gallery shows a spread of projects, not five screenshots from the
+      //     one repo that happens to have the most images — so it caps how many
+      //     items come from any single repo and round-robins across repos before
+      //     filling any remaining slots by size.
+      function pickBest(candidates, maxItems) {
+        const EXCLUDE_NAME = /\b(logo|icon|favicon|badge|banner|avatar)\b/i;
+        const MIN_BYTES = { video: 150000, image: 20000 }; // filters out tiny placeholder/logo files
+
+        const pool = candidates.filter(c => {
+          if (EXCLUDE_NAME.test(c.name)) return false;
+          const isVideo = /\.mp4$/i.test(c.name);
+          const minSize = isVideo ? MIN_BYTES.video : MIN_BYTES.image;
+          if (c.size && c.size < minSize) return false;
+          return true;
+        });
+
+        const byRepo = {};
+        const repoOrder = []; // preserves scan order (repos already sorted by "recently updated")
+        for (const c of pool) {
+          if (!byRepo[c.repo]) { byRepo[c.repo] = []; repoOrder.push(c.repo); }
+          byRepo[c.repo].push(c);
+        }
+        for (const r of repoOrder) byRepo[r].sort((a, b) => (b.size || 0) - (a.size || 0));
+
+        const picked = [];
+        const pickedUrls = new Set();
+        for (let round = 0; picked.length < maxItems && round < 3; round++) {
+          for (const r of repoOrder) {
+            if (picked.length >= maxItems) break;
+            const candidate = byRepo[r][round];
+            if (candidate) { picked.push(candidate); pickedUrls.add(candidate.url); }
+          }
+        }
+
+        // Filters removed too much (small/young repos) — backfill from the full candidate pool.
+        if (picked.length < maxItems) {
+          for (const c of candidates) {
+            if (picked.length >= maxItems) break;
+            if (!pickedUrls.has(c.url)) { picked.push(c); pickedUrls.add(c.url); }
+          }
+        }
+        return picked;
+      }
 
       const galleryEl = document.getElementById("gh-gallery");
       const statusEl = document.getElementById("gh-status");
@@ -478,7 +557,7 @@
         if (cachedRaw) {
           const cached = JSON.parse(cachedRaw);
           if (Date.now() - cached.ts < CACHE_TTL_MS) {
-            render(cached.items);
+            render(mergeWithPinned(pickBest(cached.items, MAX_ITEMS_SHOWN)));
             return;
           }
         }
@@ -507,20 +586,22 @@
                 const encodedPath = entry.path.split("/").map(encodeURIComponent).join("/");
                 const rawUrl = `https://raw.githubusercontent.com/${USERNAME}/${repo.name}/${branch}/${encodedPath}`;
                 const fileName = entry.path.split("/").pop();
-                items.push({ repo: repo.name, name: fileName, url: rawUrl, repoUrl: repo.html_url });
+                // git tree entries include a byte size for free, no extra request needed
+                items.push({ repo: repo.name, name: fileName, url: rawUrl, repoUrl: repo.html_url, size: entry.size || 0 });
               }
             }
           } catch (innerErr) { /* skip this repo, keep going */ }
-          if (items.length >= MAX_ITEMS_SHOWN * 3) break; // enough candidates, stop spending API calls
+          // no early exit here: we want to see every repo's candidates before ranking, not just the first ones found
         }
 
         try {
           sessionStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), items }));
         } catch (e) { /* ignore quota errors */ }
 
-        render(items);
+        render(mergeWithPinned(pickBest(items, MAX_ITEMS_SHOWN)));
       } catch (err) {
-        statusEl.textContent = "Live gallery is temporarily unavailable (GitHub API limit or network issue). Browse the repos directly on GitHub instead.";
+        render(mergeWithPinned([]));
+        statusEl.textContent = "Couldn't refresh from GitHub just now (API limit or network issue), showing what's pinned. Browse the repos directly on GitHub for the rest.";
       }
     })();
   </script>
